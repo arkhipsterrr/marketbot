@@ -14,8 +14,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 import random
 
 # === КОНФИГУРАЦИЯ ===
-BOT_TOKEN = "8128428418:AAESrE-3V_6O-_cuMMbclzH4nkxhZz6TDgE"
-ADMIN_ID = 911793106
+BOT_TOKEN = getenv("API_TOKEN")
+ADMIN_ID = 1453081434
 SUPPORT_LINK = "https://t.me/your_support_link"  # Замените на вашу ссылку
 REVIEWS_LINK = "https://t.me/your_reviews_link"  # Замените на вашу ссылку
 DB_NAME = "generic_store.db"
