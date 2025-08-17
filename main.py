@@ -18,17 +18,10 @@ import random
 BOT_TOKEN = getenv("API_TOKEN")  # ВАШ ТОКЕН БОТА
 ADMIN_ID = 911793106  # ВАШ ID АДМИНИСТРАТОРА
 
-# --- ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ К POSTGRESQL ---
-# ЗАПОЛНИТЕ ЭТИ ДАННЫЕ!
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "generic_store"  # Имя вашей базы данных
-DB_USER = "postgres"  # Имя пользователя
-DB_PASS = "zxczxczxc"  # Пароль пользователя
-# ---------------------------------------------
 
-SUPPORT_LINK = "https://t.me/your_support_link"
-REVIEWS_LINK = "https://t.me/your_reviews_link"
+
+SUPPORT_LINK = "https://t.me/fast_bot_creator"
+REVIEWS_LINK = "https://t.me/market_example_reviews"
 
 # --- Инициализация ---
 storage = MemoryStorage()
@@ -87,15 +80,23 @@ class AdminManagement(StatesGroup):
 
 
 # === БАЗА ДАННЫХ (POSTGRESQL) ===
+import os
+import psycopg2
+from urllib.parse import urlparse
+
+
 def get_db_connection():
-    """Устанавливает соединение с базой данных PostgreSQL."""
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS
-    )
+    """Устанавливает соединение с PostgreSQL через DATABASE_URL."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise EnvironmentError("Переменная DATABASE_URL не найдена.")
+
+    # Для совместимости с Heroku/Railway (у них URL начинается с 'postgres://')
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+    conn = psycopg2.connect(database_url)
+    return conn
 
 
 def init_db():
