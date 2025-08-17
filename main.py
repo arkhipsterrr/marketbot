@@ -13,12 +13,12 @@ from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyb
     InputMediaPhoto
 from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 import random
+import os
+from urllib.parse import urlparse
 
 # === КОНФИГУРАЦИЯ ===
 BOT_TOKEN = getenv("API_TOKEN")  # ВАШ ТОКЕН БОТА
 ADMIN_ID = 911793106  # ВАШ ID АДМИНИСТРАТОРА
-
-
 
 SUPPORT_LINK = "https://t.me/fast_bot_creator"
 REVIEWS_LINK = "https://t.me/market_example_reviews"
@@ -80,11 +80,6 @@ class AdminManagement(StatesGroup):
 
 
 # === БАЗА ДАННЫХ (POSTGRESQL) ===
-import os
-import psycopg2
-from urllib.parse import urlparse
-
-
 def get_db_connection():
     """Устанавливает соединение с PostgreSQL через DATABASE_URL."""
     database_url = os.getenv("DATABASE_URL")
@@ -838,13 +833,6 @@ async def add_to_cart_finish(message: Message, state: FSMContext):
     pid = data['product_id']
     add_to_cart(message.from_user.id, pid, quantity)
 
-    # Это действие лучше убрать, так как оно резервирует товар до брони.
-    # Если оставить, то нужно быть уверенным в логике.
-    # current_stock = data['stock']
-    # new_stock = current_stock - quantity
-    # new_status = 'in_stock' if new_stock > 0 else 'out_of_stock'
-    # update_product(pid, stock=new_stock, status=new_status)
-
     await state.clear()
     await message.answer(f"✅ Добавлено в корзину: {data['name']} ({quantity} шт.)")
     await message.answer("Главное меню:", reply_markup=main_menu(message.from_user.id))
@@ -903,8 +891,6 @@ async def show_cart_product(call: CallbackQuery):
 async def remove_from_cart_handler(call: CallbackQuery):
     pid = int(call.data.split("_")[3])  # Исправлен индекс
 
-    # Логику возврата товара на склад лучше убрать отсюда,
-    # так как при добавлении в корзину он не списывался
     remove_from_cart(call.from_user.id, pid)
     await call.answer("Товар удален из корзины", show_alert=True)
     await show_cart(call)
@@ -912,7 +898,6 @@ async def remove_from_cart_handler(call: CallbackQuery):
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart_handler(call: CallbackQuery):
-    # Логику возврата товара на склад лучше убрать отсюда
     clear_cart(call.from_user.id)
     await call.answer("Корзина очищена!", show_alert=True)
     await show_cart(call)
@@ -924,12 +909,10 @@ async def reserve_all_handler(call: CallbackQuery, state: FSMContext):
     if not cart_items:
         return await call.answer("Корзина пуста!", show_alert=True)
 
-    # Проверка наличия всех товаров перед бронированием
     for pid, name, price, quantity in cart_items:
         prod = get_product_by_id(pid)
         if not prod or prod['stock'] < quantity:
             await call.answer(f"Недостаточно товара «{name}». В наличии: {prod.get('stock', 0)} шт.", show_alert=True)
-            # Не очищаем корзину, даем пользователю исправить
             return
 
     await state.set_state(ReserveFromCard.date)
@@ -978,7 +961,6 @@ async def reserve_from_card_quantity(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введите число.")
         return
 
-    # Создаем список из одного товара для унификации
     item = get_product_by_id(data['product_id'])
     items_to_reserve = [(item['id'], item['name'], item['price'], quantity)]
 
@@ -1026,6 +1008,20 @@ async def reserve_from_card_date(call: CallbackQuery, state: FSMContext):
 
     # Очищаем корзину, если бронировали из нее
     clear_cart(call.from_user.id)
+
+    # --- Начало изменений ---
+    # Формируем и отправляем уведомление администраторам
+    buyer_username = call.from_user.username if call.from_user.username else f"ID: {call.from_user.id}"
+    notification_text = (f"🔔 <b>Новая бронь!</b>\n\n"
+                         f"👤 <b>Покупатель:</b> @{buyer_username}\n"
+                         f"🔢 <b>Код брони:</b> <code>{code}</code>")
+
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, notification_text)
+        except Exception as e:
+            print(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+    # --- Конец изменений ---
 
     await state.clear()
 
