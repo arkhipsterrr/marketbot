@@ -1,6 +1,7 @@
 import asyncio
-import os
-import sqlite3
+from os import getenv
+import psycopg2
+import psycopg2.extras  # Для DictCursor
 import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
@@ -14,11 +15,20 @@ from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 import random
 
 # === КОНФИГУРАЦИЯ ===
-BOT_TOKEN = getenv("API_TOKEN")
-ADMIN_ID = 1453081434
-SUPPORT_LINK = "https://t.me/your_support_link"  # Замените на вашу ссылку
-REVIEWS_LINK = "https://t.me/your_reviews_link"  # Замените на вашу ссылку
-DB_NAME = "generic_store.db"
+BOT_TOKEN = getenv("API_TOKEN")  # ВАШ ТОКЕН БОТА
+ADMIN_ID = 911793106  # ВАШ ID АДМИНИСТРАТОРА
+
+# --- ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ К POSTGRESQL ---
+# ЗАПОЛНИТЕ ЭТИ ДАННЫЕ!
+DB_HOST = "localhost"
+DB_PORT = "5432"
+DB_NAME = "generic_store"  # Имя вашей базы данных
+DB_USER = "postgres"  # Имя пользователя
+DB_PASS = "zxczxczxc"  # Пароль пользователя
+# ---------------------------------------------
+
+SUPPORT_LINK = "https://t.me/your_support_link"
+REVIEWS_LINK = "https://t.me/your_reviews_link"
 
 # --- Инициализация ---
 storage = MemoryStorage()
@@ -76,19 +86,29 @@ class AdminManagement(StatesGroup):
     add_admin_id = State()
 
 
-# === БАЗА ДАННЫХ ===
+# === БАЗА ДАННЫХ (POSTGRESQL) ===
+def get_db_connection():
+    """Устанавливает соединение с базой данных PostgreSQL."""
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS
+    )
+
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    """Инициализирует таблицы в базе данных PostgreSQL."""
+    conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute('PRAGMA foreign_keys = ON;')
     cur.execute('''
                 CREATE TABLE IF NOT EXISTS products
                 (
                     id
-                    INTEGER
+                    SERIAL
                     PRIMARY
-                    KEY
-                    AUTOINCREMENT,
+                    KEY,
                     category
                     TEXT
                     NOT
@@ -104,26 +124,38 @@ def init_db():
                     description
                     TEXT,
                     price
-                    REAL
-                    NOT
-                    NULL,
-                    stock
-                    INTEGER
+                    DECIMAL
+                (
+                    10,
+                    2
+                ) NOT NULL,
+                    stock INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'in_stock',
+                    photo TEXT
+                    )
+                ''')
+    cur.execute('''
+                CREATE TABLE IF NOT EXISTS users
+                (
+                    user_id
+                    BIGINT
+                    PRIMARY
+                    KEY,
+                    username
+                    TEXT,
+                    first_seen
+                    TIMESTAMP
                     DEFAULT
-                    0,
-                    status
-                    TEXT
-                    DEFAULT
-                    'in_stock',
-                    photo
-                    TEXT
+                    NOW
+                (
                 )
+                    )
                 ''')
     cur.execute('''
                 CREATE TABLE IF NOT EXISTS cart
                 (
                     user_id
-                    INTEGER,
+                    BIGINT,
                     product_id
                     INTEGER,
                     quantity
@@ -146,30 +178,14 @@ def init_db():
                     )
                 ''')
     cur.execute('''
-                CREATE TABLE IF NOT EXISTS users
-                (
-                    user_id
-                    INTEGER
-                    PRIMARY
-                    KEY,
-                    username
-                    TEXT,
-                    first_seen
-                    DATETIME
-                    DEFAULT
-                    CURRENT_TIMESTAMP
-                )
-                ''')
-    cur.execute('''
                 CREATE TABLE IF NOT EXISTS reservations
                 (
                     id
-                    INTEGER
+                    SERIAL
                     PRIMARY
-                    KEY
-                    AUTOINCREMENT,
+                    KEY,
                     user_id
-                    INTEGER
+                    BIGINT
                     NOT
                     NULL,
                     username
@@ -187,30 +203,22 @@ def init_db():
                     NOT
                     NULL,
                     price
-                    REAL
-                    NOT
-                    NULL,
-                    reservation_code
-                    INTEGER
-                    NOT
-                    NULL,
-                    reservation_date
-                    TEXT
-                    NOT
-                    NULL,
-                    status
-                    TEXT
-                    DEFAULT
-                    'active', -- active, completed, expired
-                    completion_date
-                    DATETIME
-                )
+                    DECIMAL
+                (
+                    10,
+                    2
+                ) NOT NULL,
+                    reservation_code INTEGER NOT NULL,
+                    reservation_date DATE NOT NULL,
+                    status TEXT DEFAULT 'active', -- active, completed, expired
+                    completion_date TIMESTAMP
+                    )
                 ''')
     cur.execute('''
                 CREATE TABLE IF NOT EXISTS admins
                 (
                     user_id
-                    INTEGER
+                    BIGINT
                     PRIMARY
                     KEY
                 )
@@ -219,10 +227,9 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS promotions
                 (
                     id
-                    INTEGER
+                    SERIAL
                     PRIMARY
-                    KEY
-                    AUTOINCREMENT,
+                    KEY,
                     title
                     TEXT
                     NOT
@@ -237,10 +244,9 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS faq
                 (
                     id
-                    INTEGER
+                    SERIAL
                     PRIMARY
-                    KEY
-                    AUTOINCREMENT,
+                    KEY,
                     question
                     TEXT
                     NOT
@@ -251,278 +257,284 @@ def init_db():
                     NULL
                 )
                 ''')
-    cur.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (ADMIN_ID,))
+    # PostgreSQL синтаксис для "INSERT OR IGNORE"
+    cur.execute("INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (ADMIN_ID,))
     conn.commit()
+    cur.close()
     conn.close()
-
-
-def get_db_connection():
-    return sqlite3.connect(DB_NAME)
 
 
 # --- Функции для админов ---
 def load_admins():
     global ADMINS
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM admins")
-        ADMINS = {row[0] for row in cur.fetchall()}
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id FROM admins")
+            ADMINS = {row[0] for row in cur.fetchall()}
 
 
 def add_admin_to_db(user_id):
     with get_db_connection() as conn:
-        conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (user_id,))
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
     load_admins()
 
 
 def remove_admin_from_db(user_id):
     with get_db_connection() as conn:
-        conn.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM admins WHERE user_id=%s", (user_id,))
     load_admins()
 
 
 # --- Функции для товаров ---
 def get_products_by_category(category):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT brand FROM products WHERE category=? ORDER BY brand", (category,))
-        return [b[0] for b in cur.fetchall()]
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT brand FROM products WHERE category=%s ORDER BY brand", (category,))
+            return [b[0] for b in cur.fetchall()]
 
 
 def get_products_by_brand(category, brand):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, name, price, stock, status, photo, description FROM products WHERE category=? AND brand=?",
-            (category, brand))
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, name, price, stock, status, photo, description FROM products WHERE category=%s AND brand=%s",
+                (category, brand))
+            return cur.fetchall()
 
 
 def get_product_by_id(product_id):
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM products WHERE id=?", (product_id,))
-        row = cur.fetchone()
-        return dict(row) if row else None
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:  # Используем DictCursor
+            cur.execute("SELECT * FROM products WHERE id=%s", (product_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def add_product(category, brand, name, description, price, stock, photo):
     with get_db_connection() as conn:
-        status = 'in_stock' if stock > 0 else 'out_of_stock'
-        conn.execute(
-            "INSERT INTO products (category, brand, name, description, price, stock, status, photo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (category, brand, name, description, price, stock, status, photo))
+        with conn.cursor() as cur:
+            status = 'in_stock' if stock > 0 else 'out_of_stock'
+            cur.execute(
+                "INSERT INTO products (category, brand, name, description, price, stock, status, photo) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (category, brand, name, description, price, stock, status, photo))
 
 
 def update_product(product_id, **kwargs):
     with get_db_connection() as conn:
-        fields = ', '.join([f"{k}=?" for k in kwargs.keys()])
-        values = list(kwargs.values()) + [product_id]
-        conn.execute(f"UPDATE products SET {fields} WHERE id=?", values)
+        with conn.cursor() as cur:
+            fields = ', '.join([f"{k}=%s" for k in kwargs.keys()])
+            values = list(kwargs.values()) + [product_id]
+            cur.execute(f"UPDATE products SET {fields} WHERE id=%s", values)
 
 
 def delete_product(product_id):
     with get_db_connection() as conn:
-        conn.execute("DELETE FROM products WHERE id=?", (product_id,))
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM products WHERE id=%s", (product_id,))
 
 
 # --- Функции для корзины ---
 def add_to_cart(user_id, product_id, quantity):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT quantity FROM cart WHERE user_id = ? AND product_id = ?", (user_id, product_id))
-        result = cur.fetchone()
-        if result:
-            new_quantity = result[0] + quantity
-            cur.execute("UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?",
-                        (new_quantity, user_id, product_id))
-        else:
-            cur.execute("INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)",
-                        (user_id, product_id, quantity))
+        with conn.cursor() as cur:
+            cur.execute("SELECT quantity FROM cart WHERE user_id = %s AND product_id = %s", (user_id, product_id))
+            result = cur.fetchone()
+            if result:
+                new_quantity = result[0] + quantity
+                cur.execute("UPDATE cart SET quantity = %s WHERE user_id = %s AND product_id = %s",
+                            (new_quantity, user_id, product_id))
+            else:
+                cur.execute("INSERT INTO cart (user_id, product_id, quantity) VALUES (%s, %s, %s)",
+                            (user_id, product_id, quantity))
 
 
 def get_cart(user_id):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute('''SELECT p.id, p.name, p.price, c.quantity
-                       FROM cart c
-                                JOIN products p ON c.product_id = p.id
-                       WHERE c.user_id = ?''', (user_id,))
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute('''SELECT p.id, p.name, p.price, c.quantity
+                           FROM cart c
+                                    JOIN products p ON c.product_id = p.id
+                           WHERE c.user_id = %s''', (user_id,))
+            return cur.fetchall()
 
 
 def remove_from_cart(user_id, product_id):
     with get_db_connection() as conn:
-        conn.execute("DELETE FROM cart WHERE user_id = ? AND product_id = ?", (user_id, product_id))
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cart WHERE user_id = %s AND product_id = %s", (user_id, product_id))
 
 
 def get_all_carts():
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT u.user_id, u.username FROM cart c JOIN users u ON c.user_id = u.user_id")
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT u.user_id, u.username FROM cart c JOIN users u ON c.user_id = u.user_id")
+            return cur.fetchall()
 
 
 def clear_cart(user_id: int):
     with get_db_connection() as conn:
-        conn.execute("DELETE FROM cart WHERE user_id = ?", (user_id,))
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cart WHERE user_id = %s", (user_id,))
 
 
 # --- Функции для бронирования ---
 def add_reservation(user_id, username, code, date, item):
     with get_db_connection() as conn:
-        conn.execute(
-            "INSERT INTO reservations (user_id, username, reservation_code, reservation_date, product_id, product_name, quantity, price) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, username, code, date, item['pid'], item['name'], item['quantity'], item['price'])
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO reservations (user_id, username, reservation_code, reservation_date, product_id, product_name, quantity, price) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (user_id, username, code, date, item['pid'], item['name'], item['quantity'], item['price'])
+            )
 
 
 def get_user_reservation_dates(user_id):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT reservation_date FROM reservations WHERE user_id=? AND status='active' ORDER BY reservation_date DESC",
-            (user_id,))
-        return [row[0] for row in cur.fetchall()]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT reservation_date FROM reservations WHERE user_id=%s AND status='active' ORDER BY reservation_date DESC",
+                (user_id,))
+            # Преобразуем объекты date в строки
+            return [row[0].isoformat() for row in cur.fetchall()]
 
 
 def get_user_reservations_by_date(user_id, date):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT reservation_code, product_name, quantity, price FROM reservations WHERE user_id=? AND reservation_date=? AND status='active'",
-            (user_id, date))
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT reservation_code, product_name, quantity, price FROM reservations WHERE user_id=%s AND reservation_date=%s AND status='active'",
+                (user_id, date))
+            return cur.fetchall()
 
 
 def get_all_reservations():
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, reservation_code FROM reservations WHERE status = 'active' GROUP BY reservation_code ORDER BY id ASC")
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, reservation_code FROM reservations WHERE status = 'active' GROUP BY reservation_code, id ORDER BY id ASC")
+            return cur.fetchall()
 
 
 def get_reservation_details(res_id):
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        # Ensure we get details for all items with the same reservation_code
-        cur.execute("SELECT reservation_code FROM reservations WHERE id=?", (res_id,))
-        res_code_row = cur.fetchone()
-        if not res_code_row:
-            return None, None
-        res_code = res_code_row[0]
+        with conn.cursor() as cur:
+            cur.execute("SELECT reservation_code FROM reservations WHERE id=%s", (res_id,))
+            res_code_row = cur.fetchone()
+            if not res_code_row:
+                return None, None
+            res_code = res_code_row[0]
 
-        cur.execute(
-            "SELECT user_id, username, reservation_code, reservation_date FROM reservations WHERE reservation_code=? LIMIT 1",
-            (res_code,))
-        res_info = cur.fetchone()
+            cur.execute(
+                "SELECT user_id, username, reservation_code, reservation_date FROM reservations WHERE reservation_code=%s LIMIT 1",
+                (res_code,))
+            res_info = cur.fetchone()
 
-        cur.execute("SELECT id, product_name, quantity, price FROM reservations WHERE reservation_code=?", (res_code,))
-        items = cur.fetchall()
+            cur.execute("SELECT id, product_name, quantity, price FROM reservations WHERE reservation_code=%s",
+                        (res_code,))
+            items = cur.fetchall()
 
-        return res_info, items
+            return res_info, items
 
 
 def complete_reservation(res_code):
     with get_db_connection() as conn:
-        conn.execute(
-            "UPDATE reservations SET status='completed', completion_date=CURRENT_TIMESTAMP WHERE reservation_code=?",
-            (res_code,))
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE reservations SET status='completed', completion_date=NOW() WHERE reservation_code=%s",
+                (res_code,))
 
 
 # --- Функции для акций ---
 def get_all_promotions():
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, title FROM promotions")
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, title FROM promotions")
+            return cur.fetchall()
 
 
 def get_promotion_by_id(promo_id):
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM promotions WHERE id=?", (promo_id,))
-        row = cur.fetchone()
-        return dict(row) if row else None
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT * FROM promotions WHERE id=%s", (promo_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def add_promotion(title, content, photo):
     with get_db_connection() as conn:
-        conn.execute("INSERT INTO promotions (title, content, photo) VALUES (?, ?, ?)", (title, content, photo))
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO promotions (title, content, photo) VALUES (%s, %s, %s)", (title, content, photo))
 
 
 def delete_promotion(promo_id):
     with get_db_connection() as conn:
-        conn.execute("DELETE FROM promotions WHERE id=?", (promo_id,))
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM promotions WHERE id=%s", (promo_id,))
 
 
 # --- Функции для FAQ ---
 def get_all_faq():
     with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, question FROM faq")
-        return cur.fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, question FROM faq")
+            return cur.fetchall()
 
 
 def get_faq_by_id(faq_id):
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM faq WHERE id=?", (faq_id,))
-        row = cur.fetchone()
-        return dict(row) if row else None
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT * FROM faq WHERE id=%s", (faq_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def add_faq(question, answer):
     with get_db_connection() as conn:
-        conn.execute("INSERT INTO faq (question, answer) VALUES (?, ?)", (question, answer))
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO faq (question, answer) VALUES (%s, %s)", (question, answer))
 
 
 def delete_faq(faq_id):
     with get_db_connection() as conn:
-        conn.execute("DELETE FROM faq WHERE id=?", (faq_id,))
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM faq WHERE id=%s", (faq_id,))
 
 
 # --- Функции для статистики ---
 def get_stats():
     with get_db_connection() as conn:
-        cur = conn.cursor()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(user_id) FROM users")
+            total_users = cur.fetchone()[0]
 
-        # Total users
-        cur.execute("SELECT COUNT(user_id) FROM users")
-        total_users = cur.fetchone()[0]
+            cur.execute("SELECT SUM(price * quantity) FROM reservations WHERE status='completed'")
+            total_revenue = cur.fetchone()[0] or 0
 
-        # Revenue
-        cur.execute("SELECT SUM(price * quantity) FROM reservations WHERE status='completed'")
-        total_revenue = cur.fetchone()[0] or 0
+            # PostgreSQL синтаксис для интервалов дат
+            cur.execute(
+                "SELECT SUM(price * quantity) FROM reservations WHERE status='completed' AND completion_date >= NOW() - INTERVAL '7 days'")
+            revenue_7_days = cur.fetchone()[0] or 0
 
-        cur.execute(
-            "SELECT SUM(price * quantity) FROM reservations WHERE status='completed' AND completion_date >= date('now', '-7 days')")
-        revenue_7_days = cur.fetchone()[0] or 0
+            cur.execute(
+                "SELECT SUM(price * quantity) FROM reservations WHERE status='completed' AND completion_date >= NOW() - INTERVAL '30 days'")
+            revenue_30_days = cur.fetchone()[0] or 0
 
-        cur.execute(
-            "SELECT SUM(price * quantity) FROM reservations WHERE status='completed' AND completion_date >= date('now', '-30 days')")
-        revenue_30_days = cur.fetchone()[0] or 0
+            cur.execute(
+                "SELECT COUNT(DISTINCT reservation_code) FROM reservations WHERE status='completed' AND completion_date::date = CURRENT_DATE")
+            sales_today = cur.fetchone()[0]
 
-        # Sales (completed reservations)
-        cur.execute(
-            "SELECT COUNT(DISTINCT reservation_code) FROM reservations WHERE status='completed' AND date(completion_date) = date('now')")
-        sales_today = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT reservation_code) FROM reservations WHERE status='completed'")
+            sales_total = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(DISTINCT reservation_code) FROM reservations WHERE status='completed'")
-        sales_total = cur.fetchone()[0]
-
-        return {
-            "total_users": total_users,
-            "total_revenue": f"{total_revenue:.2f}",
-            "revenue_7_days": f"{revenue_7_days:.2f}",
-            "revenue_30_days": f"{revenue_30_days:.2f}",
-            "sales_today": sales_today,
-            "sales_total": sales_total,
-        }
+            return {
+                "total_users": total_users,
+                "total_revenue": f"{total_revenue:.2f}",
+                "revenue_7_days": f"{revenue_7_days:.2f}",
+                "revenue_30_days": f"{revenue_30_days:.2f}",
+                "sales_today": sales_today,
+                "sales_total": sales_total,
+            }
 
 
 # === КЛАВИАТУРЫ ===
@@ -607,7 +619,8 @@ def product_list_kb(products, prefix, back_target):
     for row in products:
         pid, name, price, stock, status, _, _ = row
         icon = "✅" if status == 'in_stock' and stock > 0 else "❌"
-        text = f"{icon} {name} — {price}₽"
+        # price может быть Decimal, преобразуем в строку
+        text = f"{icon} {name} — {float(price)}₽"
         buttons.append([InlineKeyboardButton(text=text, callback_data=f"{prefix}_prod_{pid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_target)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -669,27 +682,27 @@ async def cleanup_expired_reservations():
         today_iso = datetime.date.today().isoformat()
 
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            # Находим просроченные брони
-            cur.execute(
-                "SELECT id, product_id, quantity FROM reservations WHERE status='active' AND reservation_date < ?",
-                (today_iso,))
-            expired_reservations = cur.fetchall()
+            with conn.cursor() as cur:
+                # Находим просроченные брони
+                cur.execute(
+                    "SELECT id, product_id, quantity FROM reservations WHERE status='active' AND reservation_date < %s",
+                    (today_iso,))
+                expired_reservations = cur.fetchall()
 
-            if not expired_reservations:
-                continue
+                if not expired_reservations:
+                    continue
 
-            for res_id, prod_id, qty in expired_reservations:
-                # Возвращаем товар на склад
-                prod = get_product_by_id(prod_id)
-                if prod:
-                    new_stock = prod['stock'] + qty
-                    update_product(prod_id, stock=new_stock, status='in_stock')
+                for res_id, prod_id, qty in expired_reservations:
+                    # Возвращаем товар на склад
+                    prod = get_product_by_id(prod_id)
+                    if prod:
+                        new_stock = prod['stock'] + qty
+                        update_product(prod_id, stock=new_stock, status='in_stock')
 
-            # Удаляем просроченные брони
-            cur.execute("DELETE FROM reservations WHERE status='active' AND reservation_date < ?", (today_iso,))
-            conn.commit()
-            print(f"[{datetime.datetime.now()}] Cleaned up {len(expired_reservations)} expired reservations.")
+                # Удаляем просроченные брони
+                cur.execute("DELETE FROM reservations WHERE status='active' AND reservation_date < %s", (today_iso,))
+                conn.commit()
+                print(f"[{datetime.datetime.now()}] Cleaned up {len(expired_reservations)} expired reservations.")
 
 
 # === ГЛАВНЫЕ ОБРАБОТЧИКИ ===
@@ -697,8 +710,10 @@ async def cleanup_expired_reservations():
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     with get_db_connection() as conn:
-        conn.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
-                     (message.from_user.id, message.from_user.username))
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username",
+                (message.from_user.id, message.from_user.username))
     await message.answer("Добро пожаловать в наш магазин!", reply_markup=main_menu(message.from_user.id))
 
 
@@ -774,7 +789,7 @@ async def user_show_product_card(call: CallbackQuery):
         'stock'] > 0 else "🔴 Нет в наличии"
     text = (f"📦 <b>{prod['name']}</b>\n\n"
             f"{prod['description']}\n\n"
-            f"💰 <b>Цена:</b> {prod['price']}₽\n"
+            f"💰 <b>Цена:</b> {float(prod['price'])}₽\n"
             f"📊 <b>Наличие:</b> {availability}")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -822,10 +837,12 @@ async def add_to_cart_finish(message: Message, state: FSMContext):
     pid = data['product_id']
     add_to_cart(message.from_user.id, pid, quantity)
 
-    current_stock = data['stock']
-    new_stock = current_stock - quantity
-    new_status = 'in_stock' if new_stock > 0 else 'out_of_stock'
-    update_product(pid, stock=new_stock, status=new_status)
+    # Это действие лучше убрать, так как оно резервирует товар до брони.
+    # Если оставить, то нужно быть уверенным в логике.
+    # current_stock = data['stock']
+    # new_stock = current_stock - quantity
+    # new_status = 'in_stock' if new_stock > 0 else 'out_of_stock'
+    # update_product(pid, stock=new_stock, status=new_status)
 
     await state.clear()
     await message.answer(f"✅ Добавлено в корзину: {data['name']} ({quantity} шт.)")
@@ -846,11 +863,11 @@ async def show_cart(call: CallbackQuery):
     for pid, name, price, quantity in cart_items:
         item_total = price * quantity
         total_price += item_total
-        text += f"• {name} ({quantity} шт.) - {price}₽/шт.\n"
+        text += f"• {name} ({quantity} шт.) - {float(price)}₽/шт.\n"
         kb_buttons.append(
             [InlineKeyboardButton(text=f"👁️ {name}", callback_data=f"cart_prod_{pid}")])
 
-    text += f"\n<b>Итого: {total_price}₽</b>"
+    text += f"\n<b>Итого: {float(total_price)}₽</b>"
 
     action_buttons = cart_actions_kb().inline_keyboard
     full_kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons + action_buttons)
@@ -869,7 +886,7 @@ async def show_cart_product(call: CallbackQuery):
         'stock'] > 0 else "🔴 Нет в наличии"
     text = (f"📦 <b>{prod['name']}</b> (из корзины)\n\n"
             f"{prod['description']}\n\n"
-            f"💰 <b>Цена:</b> {prod['price']}₽\n"
+            f"💰 <b>Цена:</b> {float(prod['price'])}₽\n"
             f"📊 <b>Наличие:</b> {availability}")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -883,20 +900,10 @@ async def show_cart_product(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("del_from_cart_"))
 async def remove_from_cart_handler(call: CallbackQuery):
-    pid = int(call.data.split("_")[3])
-    cart_items = get_cart(call.from_user.id)
-    quantity_to_return = 0
-    for item_pid, _, _, qty in cart_items:
-        if item_pid == pid:
-            quantity_to_return = qty
-            break
+    pid = int(call.data.split("_")[3])  # Исправлен индекс
 
-    if quantity_to_return > 0:
-        prod = get_product_by_id(pid)
-        if prod:
-            new_stock = prod['stock'] + quantity_to_return
-            update_product(pid, stock=new_stock, status='in_stock')
-
+    # Логику возврата товара на склад лучше убрать отсюда,
+    # так как при добавлении в корзину он не списывался
     remove_from_cart(call.from_user.id, pid)
     await call.answer("Товар удален из корзины", show_alert=True)
     await show_cart(call)
@@ -904,13 +911,7 @@ async def remove_from_cart_handler(call: CallbackQuery):
 
 @dp.callback_query(F.data == "clear_cart")
 async def clear_cart_handler(call: CallbackQuery):
-    cart_items = get_cart(call.from_user.id)
-    for pid, _, _, qty in cart_items:
-        prod = get_product_by_id(pid)
-        if prod:
-            new_stock = prod['stock'] + qty
-            update_product(pid, stock=new_stock, status='in_stock')
-
+    # Логику возврата товара на склад лучше убрать отсюда
     clear_cart(call.from_user.id)
     await call.answer("Корзина очищена!", show_alert=True)
     await show_cart(call)
@@ -1023,8 +1024,7 @@ async def reserve_from_card_date(call: CallbackQuery, state: FSMContext):
         update_product(pid, stock=new_stock, status='in_stock' if new_stock > 0 else 'out_of_stock')
 
     # Очищаем корзину, если бронировали из нее
-    if len(items_to_reserve) > 1 or call.message.text and "корзине" in call.message.text:
-        clear_cart(call.from_user.id)
+    clear_cart(call.from_user.id)
 
     await state.clear()
 
@@ -1044,17 +1044,20 @@ async def user_reservations_dates(call: CallbackQuery):
         return await send_or_edit(call, "У вас нет активных бронирований.", InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]))
 
-    kb = [[InlineKeyboardButton(text=date, callback_data=f"show_res_date_{date}")] for date in dates]
+    # Форматируем дату для вывода
+    kb = [[InlineKeyboardButton(text=datetime.date.fromisoformat(date).strftime("%d.%m.%Y"),
+                                callback_data=f"show_res_date_{date}")] for date in dates]
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
     await send_or_edit(call, "Выберите дату, чтобы посмотреть бронирования:", InlineKeyboardMarkup(inline_keyboard=kb))
 
 
 @dp.callback_query(F.data.startswith("show_res_date_"))
 async def user_show_reservation_by_date(call: CallbackQuery):
-    date = call.data.split("_")[3]
-    reservations = get_user_reservations_by_date(call.from_user.id, date)
+    date_iso = call.data.split("_")[3]
+    date_formatted = datetime.date.fromisoformat(date_iso).strftime("%d.%m.%Y")
+    reservations = get_user_reservations_by_date(call.from_user.id, date_iso)
 
-    text = f"<b>Бронирования на {date}:</b>\n\n"
+    text = f"<b>Бронирования на {date_formatted}:</b>\n\n"
 
     grouped_res = {}
     for code, name, qty, price in reservations:
@@ -1068,8 +1071,8 @@ async def user_show_reservation_by_date(call: CallbackQuery):
         for item in items:
             item_total = item['price'] * item['qty']
             total_price += item_total
-            text += f"• {item['name']} ({item['qty']} шт.) - {item['price']}₽/шт.\n"
-        text += f"<i>Итого по брони: {total_price}₽</i>\n\n"
+            text += f"• {item['name']} ({item['qty']} шт.) - {float(item['price'])}₽/шт.\n"
+        text += f"<i>Итого по брони: {float(total_price)}₽</i>\n\n"
 
     await send_or_edit(call, text, InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к датам", callback_data="user_reservations")]]))
@@ -1629,16 +1632,19 @@ async def admin_view_cart(call: CallbackQuery):
     cart_items = get_cart(user_id)
 
     with get_db_connection() as conn:
-        user_info = conn.execute("SELECT username FROM users WHERE user_id=?", (user_id,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("SELECT username FROM users WHERE user_id=%s", (user_id,))
+            user_info = cur.fetchone()
+
     username = user_info[0] if user_info and user_info[0] else f"ID {user_id}"
 
     text = f"<b>🛒 Корзина пользователя</b>\nПользователь: @{username} (<code>{user_id}</code>)\n\n<b>Состав заказа:</b>\n"
     total_price = 0
     for pid, name, price, quantity in cart_items:
         total_price += price * quantity
-        text += f"• {name} ({quantity} шт.) - {price}₽/шт.\n"
+        text += f"• {name} ({quantity} шт.) - {float(price)}₽/шт.\n"
 
-    text += f"\n<b>Общая сумма: {total_price}₽</b>"
+    text += f"\n<b>Общая сумма: {float(total_price)}₽</b>"
 
     await send_or_edit(call, text, InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_carts")]]))
@@ -1720,13 +1726,14 @@ async def admin_show_reservation_details(call: CallbackQuery):
         return await call.answer("Бронь не найдена.", show_alert=True)
 
     user_id, username, code, date = res_info
-    text = f"<b>Бронь #{code}</b>\nПользователь: @{username} (<code>{user_id}</code>)\nДата получения: {date}\n\n<b>Состав заказа:</b>\n"
+    date_formatted = date.strftime("%d.%m.%Y")
+    text = f"<b>Бронь #{code}</b>\nПользователь: @{username} (<code>{user_id}</code>)\nДата получения: {date_formatted}\n\n<b>Состав заказа:</b>\n"
     total_price = 0
     for _, name, qty, price in items:
-        text += f"• {name} ({qty} шт.) - {price}₽/шт.\n"
+        text += f"• {name} ({qty} шт.) - {float(price)}₽/шт.\n"
         total_price += qty * price
 
-    text += f"\n<b>Общая сумма: {total_price}₽</b>"
+    text += f"\n<b>Общая сумма: {float(total_price)}₽</b>"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выполнено (завершить)", callback_data=f"complete_res_{code}")],
@@ -1760,5 +1767,13 @@ async def main():
 
 
 if __name__ == "__main__":
-    init_db()
-    asyncio.run(main())
+    # Убедитесь, что у вас есть база данных PostgreSQL и она запущена.
+    try:
+        init_db()
+        print("База данных успешно инициализирована.")
+        asyncio.run(main())
+    except psycopg2.OperationalError as e:
+        print(f"ОШИБКА: Не удалось подключиться к базе данных PostgreSQL.")
+        print(f"Детали: {e}")
+        print(
+            "Пожалуйста, проверьте данные подключения (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS) и убедитесь, что сервер PostgreSQL запущен.")
